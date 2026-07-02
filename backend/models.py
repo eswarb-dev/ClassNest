@@ -333,6 +333,7 @@ class ClassCodespace(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     classroom = relationship("Classroom", back_populates="codespace")
     tasks = relationship("CodingTask", cascade="all, delete-orphan", passive_deletes=True, back_populates="codespace")
+    assessments = relationship("CodingAssessment", cascade="all, delete-orphan", passive_deletes=True, back_populates="codespace")
 
 
 class PasswordResetToken(Base):
@@ -434,3 +435,100 @@ class CodingSubmission(Base):
     completion_email_sent = Column(Boolean, default=False, nullable=False)
     task = relationship("CodingTask", back_populates="submissions")
     student = relationship("User")
+
+
+class CodingAssessment(Base):
+    __tablename__ = "coding_assessments"
+    __table_args__ = (Index("idx_coding_assessments_codespace_id", "codespace_id"),)
+    id = Column(Integer, primary_key=True)
+    codespace_id = Column(Integer, ForeignKey("class_codespaces.id", ondelete="CASCADE"), nullable=False, index=True)
+    title = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+    task_type = Column(String(20), default="python", nullable=False)
+    total_marks = Column(Integer, default=0, nullable=False)
+    due_at = Column(DateTime, nullable=True)
+    is_published = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    codespace = relationship("ClassCodespace", back_populates="assessments")
+    questions = relationship("CodingAssessmentQuestion", cascade="all, delete-orphan", passive_deletes=True, back_populates="assessment", order_by="CodingAssessmentQuestion.sort_order")
+    submissions = relationship("CodingAssessmentSubmission", cascade="all, delete-orphan", passive_deletes=True, back_populates="assessment")
+
+
+class CodingAssessmentQuestion(Base):
+    __tablename__ = "coding_assessment_questions"
+    __table_args__ = (Index("idx_coding_assessment_questions_assessment_id", "assessment_id"),)
+    id = Column(Integer, primary_key=True)
+    assessment_id = Column(Integer, ForeignKey("coding_assessments.id", ondelete="CASCADE"), nullable=False, index=True)
+    question_id = Column(Text, nullable=True)
+    title = Column(Text, nullable=False)
+    description = Column(Text, nullable=False)
+    starter_code = Column(Text, nullable=True)
+    starter_html = Column(Text, nullable=True)
+    starter_css = Column(Text, nullable=True)
+    starter_js = Column(Text, nullable=True)
+    expected_output = Column(Text, nullable=True)
+    visible_test_cases = Column(Text, nullable=True)
+    hidden_test_cases = Column(Text, nullable=True)
+    marks = Column(Integer, default=10, nullable=False)
+    sort_order = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    assessment = relationship("CodingAssessment", back_populates="questions")
+    answer_key = relationship("CodingAssessmentAnswerKey", cascade="all, delete-orphan", passive_deletes=True, back_populates="question", uselist=False)
+    answers = relationship("CodingAssessmentAnswer", cascade="all, delete-orphan", passive_deletes=True, back_populates="question")
+
+
+class CodingAssessmentSubmission(Base):
+    __tablename__ = "coding_assessment_submissions"
+    __table_args__ = (
+        UniqueConstraint("assessment_id", "student_id"),
+        Index("idx_coding_assessment_submissions_assessment_id", "assessment_id"),
+    )
+    id = Column(Integer, primary_key=True)
+    assessment_id = Column(Integer, ForeignKey("coding_assessments.id", ondelete="CASCADE"), nullable=False, index=True)
+    student_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String(30), default="submitted", nullable=False)
+    total_marks_awarded = Column(Integer, default=0, nullable=False)
+    feedback = Column(Text, nullable=True)
+    submitted_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    evaluated_at = Column(DateTime, nullable=True)
+    completion_email_sent = Column(Boolean, default=False, nullable=False)
+    assessment = relationship("CodingAssessment", back_populates="submissions")
+    student = relationship("User")
+    answers = relationship("CodingAssessmentAnswer", cascade="all, delete-orphan", passive_deletes=True, back_populates="submission")
+
+
+class CodingAssessmentAnswer(Base):
+    __tablename__ = "coding_assessment_answers"
+    __table_args__ = (
+        UniqueConstraint("submission_id", "question_id"),
+        Index("idx_coding_assessment_answers_submission_id", "submission_id"),
+    )
+    id = Column(Integer, primary_key=True)
+    submission_id = Column(Integer, ForeignKey("coding_assessment_submissions.id", ondelete="CASCADE"), nullable=False, index=True)
+    question_id = Column(Integer, ForeignKey("coding_assessment_questions.id", ondelete="CASCADE"), nullable=False, index=True)
+    code = Column(Text, nullable=True)
+    html_code = Column(Text, nullable=True)
+    css_code = Column(Text, nullable=True)
+    js_code = Column(Text, nullable=True)
+    output = Column(Text, nullable=True)
+    marks_awarded = Column(Integer, default=0, nullable=False)
+    feedback = Column(Text, nullable=True)
+    evaluation_status = Column(String(30), default="needs_review", nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    submission = relationship("CodingAssessmentSubmission", back_populates="answers")
+    question = relationship("CodingAssessmentQuestion", back_populates="answers")
+
+
+class CodingAssessmentAnswerKey(Base):
+    __tablename__ = "coding_assessment_answer_keys"
+    id = Column(Integer, primary_key=True)
+    question_id = Column(Integer, ForeignKey("coding_assessment_questions.id", ondelete="CASCADE"), nullable=False, index=True)
+    expected_answer = Column(Text, nullable=True)
+    expected_output = Column(Text, nullable=True)
+    visible_test_cases = Column(Text, nullable=True)
+    hidden_test_cases = Column(Text, nullable=True)
+    evaluation_rule = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    question = relationship("CodingAssessmentQuestion", back_populates="answer_key")

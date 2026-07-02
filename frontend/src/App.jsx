@@ -40,6 +40,9 @@ const ClassCodespace = lazy(() => import('./pages/ClassCodespace'))
 const CodingTaskEditor = lazy(() => import('./pages/CodingTaskEditor'))
 const CodingTaskAttempt = lazy(() => import('./pages/CodingTaskAttempt'))
 const CodingTaskSubmissions = lazy(() => import('./pages/CodingTaskSubmissions'))
+const CodingAssessmentEditor = lazy(() => import('./pages/CodingAssessmentEditor'))
+const CodingAssessmentAttempt = lazy(() => import('./pages/CodingAssessmentAttempt'))
+const CodingAssessmentSubmissions = lazy(() => import('./pages/CodingAssessmentSubmissions'))
 
 export default function App() {
   return <>
@@ -58,6 +61,9 @@ export default function App() {
         <Route path="codespaces/:codespaceId/tasks/:taskId/edit" element={<CodingTaskEditor />} />
         <Route path="codespaces/:codespaceId/tasks/:taskId/attempt" element={<CodingTaskAttempt />} />
         <Route path="codespaces/:codespaceId/tasks/:taskId/submissions" element={<CodingTaskSubmissions />} />
+        <Route path="codespaces/:codespaceId/assessments/new" element={<CodingAssessmentEditor />} />
+        <Route path="codespaces/:codespaceId/assessments/:assessmentId/attempt" element={<CodingAssessmentAttempt />} />
+        <Route path="codespaces/:codespaceId/assessments/:assessmentId/submissions" element={<CodingAssessmentSubmissions />} />
         <Route path="profile" element={<Profile />} />
         <Route path="settings" element={<Settings />} />
         <Route path="join/:joinCode" element={<InviteJoin />} />
@@ -74,6 +80,7 @@ export default function App() {
         <Route path="classes/:classId/codespace/tasks/:taskId/edit" element={<CodingTaskEditor />} />
         <Route path="classes/:classId/codespace/tasks/:taskId/attempt" element={<CodingTaskAttempt />} />
         <Route path="classes/:classId/codespace/tasks/:taskId/submissions" element={<CodingTaskSubmissions />} />
+        <Route path="classes/:classId/codespace/assessments/new" element={<CodingAssessmentEditor />} />
         <Route path="classes/:classId/notifications/email" element={<EmailNotificationPage />} />
         <Route path="units/:unitId" element={<UnitDetails />} />
         <Route path="units/:unitId/materials/new" element={<CreateMaterial />} />

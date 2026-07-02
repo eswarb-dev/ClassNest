@@ -1,5 +1,7 @@
 import os
 from pathlib import Path
+import socket
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, event, inspect, text
@@ -8,13 +10,34 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 load_dotenv()
 
 DEFAULT_DATABASE_PATH = Path(__file__).resolve().parent / "classnest.db"
-DATABASE_URL = os.getenv(
-    "DATABASE_URL", f"sqlite:///{DEFAULT_DATABASE_PATH.as_posix()}"
-)
+DEFAULT_SQLITE_URL = f"sqlite:///{DEFAULT_DATABASE_PATH.as_posix()}"
+DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_SQLITE_URL)
 
 # Convert postgres:// to postgresql:// for SQLAlchemy compatibility
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+
+def should_use_sqlite_fallback(database_url: str) -> bool:
+    if not database_url.startswith("postgresql://"):
+        return False
+    if os.getenv("CLASSNEST_DISABLE_SQLITE_FALLBACK", "").casefold() in {"1", "true", "yes"}:
+        return False
+    if os.getenv("RENDER") or os.getenv("VERCEL") or os.getenv("RAILWAY_ENVIRONMENT"):
+        return False
+    hostname = urlparse(database_url).hostname
+    if not hostname:
+        return False
+    try:
+        socket.getaddrinfo(hostname, None)
+        return False
+    except socket.gaierror:
+        print(f"WARNING: Could not resolve database host '{hostname}'. Falling back to local SQLite at {DEFAULT_DATABASE_PATH}.")
+        return True
+
+
+if should_use_sqlite_fallback(DATABASE_URL):
+    DATABASE_URL = DEFAULT_SQLITE_URL
 
 # Only use connect_args for SQLite
 connect_args = {}
@@ -304,6 +327,102 @@ def ensure_codespace_columns():
             "CREATE INDEX IF NOT EXISTS ix_coding_submissions_student_status ON coding_submissions (student_id, status)",
         ]
         for statement in indexes:
+            connection.execute(text(statement))
+
+        id_type = "SERIAL PRIMARY KEY" if DATABASE_URL.startswith("postgresql") else "INTEGER PRIMARY KEY"
+        timestamp_type = "TIMESTAMP" if DATABASE_URL.startswith("postgresql") else "DATETIME"
+        bool_false = "FALSE" if DATABASE_URL.startswith("postgresql") else "0"
+        connection.execute(text(f"""
+            CREATE TABLE IF NOT EXISTS coding_assessments (
+                id {id_type},
+                codespace_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                task_type VARCHAR(20) NOT NULL DEFAULT 'python',
+                total_marks INTEGER NOT NULL DEFAULT 0,
+                due_at {timestamp_type} NULL,
+                is_published BOOLEAN NOT NULL DEFAULT {bool_false},
+                created_at {timestamp_type} DEFAULT CURRENT_TIMESTAMP,
+                updated_at {timestamp_type} DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(codespace_id) REFERENCES class_codespaces(id) ON DELETE CASCADE
+            )
+        """))
+        connection.execute(text(f"""
+            CREATE TABLE IF NOT EXISTS coding_assessment_questions (
+                id {id_type},
+                assessment_id INTEGER NOT NULL,
+                question_id TEXT,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                starter_code TEXT,
+                starter_html TEXT,
+                starter_css TEXT,
+                starter_js TEXT,
+                expected_output TEXT,
+                visible_test_cases TEXT,
+                hidden_test_cases TEXT,
+                marks INTEGER NOT NULL DEFAULT 10,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at {timestamp_type} DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(assessment_id) REFERENCES coding_assessments(id) ON DELETE CASCADE
+            )
+        """))
+        connection.execute(text(f"""
+            CREATE TABLE IF NOT EXISTS coding_assessment_submissions (
+                id {id_type},
+                assessment_id INTEGER NOT NULL,
+                student_id INTEGER NOT NULL,
+                status VARCHAR(30) NOT NULL DEFAULT 'submitted',
+                total_marks_awarded INTEGER NOT NULL DEFAULT 0,
+                feedback TEXT,
+                submitted_at {timestamp_type} DEFAULT CURRENT_TIMESTAMP,
+                evaluated_at {timestamp_type} NULL,
+                completion_email_sent BOOLEAN NOT NULL DEFAULT {bool_false},
+                UNIQUE(assessment_id, student_id),
+                FOREIGN KEY(assessment_id) REFERENCES coding_assessments(id) ON DELETE CASCADE,
+                FOREIGN KEY(student_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        """))
+        connection.execute(text(f"""
+            CREATE TABLE IF NOT EXISTS coding_assessment_answers (
+                id {id_type},
+                submission_id INTEGER NOT NULL,
+                question_id INTEGER NOT NULL,
+                code TEXT,
+                html_code TEXT,
+                css_code TEXT,
+                js_code TEXT,
+                output TEXT,
+                marks_awarded INTEGER NOT NULL DEFAULT 0,
+                feedback TEXT,
+                evaluation_status VARCHAR(30) NOT NULL DEFAULT 'needs_review',
+                created_at {timestamp_type} DEFAULT CURRENT_TIMESTAMP,
+                updated_at {timestamp_type} DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(submission_id, question_id),
+                FOREIGN KEY(submission_id) REFERENCES coding_assessment_submissions(id) ON DELETE CASCADE,
+                FOREIGN KEY(question_id) REFERENCES coding_assessment_questions(id) ON DELETE CASCADE
+            )
+        """))
+        connection.execute(text(f"""
+            CREATE TABLE IF NOT EXISTS coding_assessment_answer_keys (
+                id {id_type},
+                question_id INTEGER NOT NULL,
+                expected_answer TEXT,
+                expected_output TEXT,
+                visible_test_cases TEXT,
+                hidden_test_cases TEXT,
+                evaluation_rule TEXT,
+                created_at {timestamp_type} DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(question_id) REFERENCES coding_assessment_questions(id) ON DELETE CASCADE
+            )
+        """))
+        assessment_indexes = [
+            "CREATE INDEX IF NOT EXISTS idx_coding_assessments_codespace_id ON coding_assessments (codespace_id)",
+            "CREATE INDEX IF NOT EXISTS idx_coding_assessment_questions_assessment_id ON coding_assessment_questions (assessment_id)",
+            "CREATE INDEX IF NOT EXISTS idx_coding_assessment_submissions_assessment_id ON coding_assessment_submissions (assessment_id)",
+            "CREATE INDEX IF NOT EXISTS idx_coding_assessment_answers_submission_id ON coding_assessment_answers (submission_id)",
+        ]
+        for statement in assessment_indexes:
             connection.execute(text(statement))
 
 

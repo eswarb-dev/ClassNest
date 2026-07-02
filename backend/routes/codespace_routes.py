@@ -34,6 +34,10 @@ def task_classroom_id(task: models.CodingTask):
     return task.codespace.classroom_id
 
 
+def assessment_classroom_id(assessment: models.CodingAssessment):
+    return assessment.codespace.classroom_id
+
+
 def task_out(task: models.CodingTask, member_role: str, student_id: int | None = None, include_code: bool = True, submission_count: int | None = None, answer_key_exists: bool | None = None, student_submission=None):
     data = schemas.CodingTaskOut.model_validate(task).model_dump()
     data["submission_count"] = submission_count if submission_count is not None else len(task.submissions or [])
@@ -74,6 +78,10 @@ def send_coding_completion_email(recipient_email: str, student_name: str, studen
     send_email(recipient_email, subject, message)
 
 
+def send_coding_assessment_completion_email(recipient_email: str, student_name: str, assessment_title: str):
+    send_email(recipient_email, f"Coding assessment completed: {assessment_title}", f"{student_name} completed {assessment_title}")
+
+
 def codespace_out(codespace: models.ClassCodespace, role: str):
     data = schemas.ClassCodespaceOut.model_validate(codespace).model_dump()
     data["classroom_name"] = codespace.classroom.name
@@ -97,6 +105,38 @@ def apply_task_answer_key(db: Session, task: models.CodingTask, answer_key: sche
     key.visible_test_cases = answer_key.visible_test_cases
     key.hidden_test_cases = answer_key.hidden_test_cases
     key.explanation = answer_key.explanation
+
+
+def assessment_out(assessment: models.CodingAssessment, member_role: str, student_id: int | None = None, include_questions: bool = False, submission_count: int | None = None, student_submission=None):
+    data = schemas.CodingAssessmentOut.model_validate(assessment).model_dump()
+    data["question_count"] = len(assessment.questions or [])
+    data["submission_count"] = submission_count if submission_count is not None else len(assessment.submissions or [])
+    if member_role == "student":
+        for question in data.get("questions", []):
+            question["hidden_test_cases"] = None
+    if not include_questions:
+        data["questions"] = []
+    if member_role == "student" and student_id:
+        submission = student_submission
+        if submission:
+            data["my_submission_status"] = submission.status
+            data["my_submission_id"] = submission.id
+            data["my_marks_awarded"] = submission.total_marks_awarded
+    return data
+
+
+def apply_assessment_answer_key(db: Session, question: models.CodingAssessmentQuestion, answer_key: schemas.CodingTaskAnswerKeyInput | None):
+    if not answer_key:
+        return
+    key = question.answer_key
+    if key is None:
+        key = models.CodingAssessmentAnswerKey(question=question)
+        db.add(key)
+    key.expected_answer = answer_key.correct_answer or answer_key.accepted_answers
+    key.expected_output = answer_key.expected_output
+    key.visible_test_cases = answer_key.visible_test_cases
+    key.hidden_test_cases = answer_key.hidden_test_cases
+    key.evaluation_rule = answer_key.explanation or answer_key.evaluation_mode
 
 
 def normalize_task_payload(data: schemas.CodingTaskInput):
@@ -305,6 +345,74 @@ async def preview_task_import(codespace_id: int, file: UploadFile = File(...), d
     return preview_coding_tasks(content)
 
 
+@router.post("/codespaces/{codespace_id}/coding-assessments/import-preview")
+async def preview_coding_assessment_import(codespace_id: int, file: UploadFile = File(...), db: Session = Depends(get_db), user=Depends(get_current_user)):
+    codespace = db.get(models.ClassCodespace, codespace_id)
+    if not codespace:
+        raise HTTPException(404, "Codespace not found")
+    require_teacher(db, codespace.classroom_id, user.id)
+    content = await read_codespace_excel_upload(file)
+    return preview_coding_tasks(content)
+
+
+@router.get("/codespaces/{codespace_id}/coding-assessments", response_model=list[schemas.CodingAssessmentOut])
+def list_coding_assessments(codespace_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    codespace = db.get(models.ClassCodespace, codespace_id)
+    if not codespace:
+        raise HTTPException(404, "Codespace not found")
+    member = require_member(db, codespace.classroom_id, user.id)
+    query = db.query(models.CodingAssessment).filter_by(codespace_id=codespace_id)
+    if member.role == "student":
+        query = query.filter(models.CodingAssessment.is_published == True)
+    assessments = query.order_by(models.CodingAssessment.created_at.desc()).all()
+    ids = [item.id for item in assessments]
+    submission_counts = dict(db.query(models.CodingAssessmentSubmission.assessment_id, func.count(models.CodingAssessmentSubmission.id)).filter(models.CodingAssessmentSubmission.assessment_id.in_(ids)).group_by(models.CodingAssessmentSubmission.assessment_id).all()) if ids else {}
+    student_submissions = {}
+    if member.role == "student" and ids:
+        student_submissions = {item.assessment_id: item for item in db.query(models.CodingAssessmentSubmission).filter(models.CodingAssessmentSubmission.assessment_id.in_(ids), models.CodingAssessmentSubmission.student_id == user.id).all()}
+    return [assessment_out(item, member.role, user.id, submission_count=submission_counts.get(item.id, 0), student_submission=student_submissions.get(item.id)) for item in assessments]
+
+
+@router.post("/codespaces/{codespace_id}/coding-assessments", response_model=schemas.CodingAssessmentOut, status_code=201)
+def create_coding_assessment(codespace_id: int, data: schemas.CodingAssessmentInput, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    codespace = db.get(models.ClassCodespace, codespace_id)
+    if not codespace:
+        raise HTTPException(404, "Codespace not found")
+    require_teacher(db, codespace.classroom_id, user.id)
+    assessment = models.CodingAssessment(
+        codespace_id=codespace_id,
+        title=data.title,
+        description=data.description,
+        task_type=data.task_type,
+        total_marks=sum(question.marks for question in data.questions),
+        due_at=data.due_at,
+        is_published=data.is_published,
+    )
+    db.add(assessment)
+    key_by_id = {key.question_id: key for key in data.answer_keys}
+    for index, item in enumerate(data.questions):
+        question = models.CodingAssessmentQuestion(
+            assessment=assessment,
+            question_id=item.question_id,
+            title=item.title,
+            description=item.description,
+            starter_code=item.starter_code if data.task_type == "python" else None,
+            starter_html=item.starter_html if data.task_type == "web" else None,
+            starter_css=item.starter_css if data.task_type == "web" else None,
+            starter_js=item.starter_js if data.task_type == "web" else None,
+            expected_output=item.expected_output,
+            visible_test_cases=item.visible_test_cases,
+            hidden_test_cases=item.hidden_test_cases,
+            marks=item.marks,
+            sort_order=index,
+        )
+        db.add(question)
+        apply_assessment_answer_key(db, question, key_by_id.get(item.question_id))
+    db.commit()
+    db.refresh(assessment)
+    return assessment_out(assessment, "teacher", include_questions=True)
+
+
 @router.post("/codespaces/{codespace_id}/preview-answer-key-import")
 async def preview_answer_key_import(codespace_id: int, file: UploadFile = File(...), db: Session = Depends(get_db), user=Depends(get_current_user)):
     codespace = db.get(models.ClassCodespace, codespace_id)
@@ -481,6 +589,146 @@ def evaluate_submission(submission_id: int, data: schemas.CodingSubmissionEvalua
     submission.evaluation_feedback = data.feedback or submission.evaluation_feedback
     submission.status = "evaluated"
     submission.evaluation_status = "teacher_evaluated"
+    submission.evaluated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(submission)
+    return submission
+
+
+@router.get("/coding-assessments/{assessment_id}", response_model=schemas.CodingAssessmentOut)
+def get_coding_assessment(assessment_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    assessment = db.get(models.CodingAssessment, assessment_id)
+    if not assessment:
+        raise HTTPException(404, "Coding assessment not found")
+    member = require_member(db, assessment_classroom_id(assessment), user.id)
+    if member.role == "student" and not assessment.is_published:
+        raise HTTPException(404, "Coding assessment not found")
+    submission = None
+    if member.role == "student":
+        submission = db.query(models.CodingAssessmentSubmission).filter_by(assessment_id=assessment.id, student_id=user.id).first()
+    return assessment_out(assessment, member.role, user.id, include_questions=True, student_submission=submission)
+
+
+@router.post("/coding-assessments/{assessment_id}/publish", response_model=schemas.CodingAssessmentOut)
+def publish_coding_assessment(assessment_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    assessment = db.get(models.CodingAssessment, assessment_id)
+    if not assessment:
+        raise HTTPException(404, "Coding assessment not found")
+    require_teacher(db, assessment_classroom_id(assessment), user.id)
+    assessment.is_published = True
+    assessment.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(assessment)
+    return assessment_out(assessment, "teacher")
+
+
+@router.delete("/coding-assessments/{assessment_id}", status_code=204)
+def delete_coding_assessment(assessment_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    assessment = db.get(models.CodingAssessment, assessment_id)
+    if not assessment:
+        raise HTTPException(404, "Coding assessment not found")
+    require_teacher(db, assessment_classroom_id(assessment), user.id)
+    db.delete(assessment)
+    db.commit()
+    return Response(status_code=204)
+
+
+@router.post("/coding-assessments/{assessment_id}/submit", response_model=schemas.CodingAssessmentSubmissionOut)
+def submit_coding_assessment(assessment_id: int, data: schemas.CodingAssessmentSubmitInput, background_tasks: BackgroundTasks, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    assessment = db.get(models.CodingAssessment, assessment_id)
+    if not assessment:
+        raise HTTPException(404, "Coding assessment not found")
+    member = require_member(db, assessment_classroom_id(assessment), user.id)
+    if member.role != "student":
+        raise HTTPException(403, "Student access required")
+    if not assessment.is_published:
+        raise HTTPException(404, "Coding assessment not found")
+    valid_question_ids = {question.id for question in assessment.questions}
+    invalid = [answer.question_id for answer in data.answers if answer.question_id not in valid_question_ids]
+    if invalid:
+        raise HTTPException(422, "One or more answers do not belong to this assessment")
+    submission = db.query(models.CodingAssessmentSubmission).filter_by(assessment_id=assessment_id, student_id=user.id).first()
+    send_completion_email = False
+    if submission:
+        send_completion_email = not submission.completion_email_sent
+        submission.status = "submitted"
+        submission.submitted_at = datetime.utcnow()
+        submission.evaluated_at = None
+        submission.total_marks_awarded = 0
+        submission.feedback = None
+    else:
+        submission = models.CodingAssessmentSubmission(assessment_id=assessment_id, student_id=user.id, submitted_at=datetime.utcnow())
+        db.add(submission)
+        db.flush()
+        send_completion_email = True
+    existing = {answer.question_id: answer for answer in submission.answers}
+    for item in data.answers:
+        answer = existing.get(item.question_id)
+        if answer is None:
+            answer = models.CodingAssessmentAnswer(submission=submission, question_id=item.question_id)
+            db.add(answer)
+        answer.code = item.code
+        answer.html_code = item.html_code
+        answer.css_code = item.css_code
+        answer.js_code = item.js_code
+        answer.output = item.output
+        answer.marks_awarded = 0
+        answer.feedback = None
+        answer.evaluation_status = "needs_review"
+        answer.updated_at = datetime.utcnow()
+    teacher = db.get(models.User, assessment.codespace.classroom.created_by_user_id)
+    if send_completion_email and teacher and teacher.email:
+        submission.completion_email_sent = True
+        background_tasks.add_task(send_coding_assessment_completion_email, teacher.email, user.name, assessment.title)
+    db.commit()
+    db.refresh(submission)
+    return {**schemas.CodingAssessmentSubmissionOut.model_validate(submission).model_dump(), "student_name": user.name, "student_email": user.email}
+
+
+@router.get("/coding-assessments/{assessment_id}/submissions", response_model=list[schemas.CodingAssessmentSubmissionOut])
+def list_coding_assessment_submissions(assessment_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    assessment = db.get(models.CodingAssessment, assessment_id)
+    if not assessment:
+        raise HTTPException(404, "Coding assessment not found")
+    require_teacher(db, assessment_classroom_id(assessment), user.id)
+    rows = db.query(models.CodingAssessmentSubmission, models.User).join(models.User, models.User.id == models.CodingAssessmentSubmission.student_id).filter(models.CodingAssessmentSubmission.assessment_id == assessment_id).order_by(models.CodingAssessmentSubmission.submitted_at.desc()).all()
+    return [{**schemas.CodingAssessmentSubmissionOut.model_validate(submission).model_dump(), "student_name": student.name, "student_email": student.email, "answers": []} for submission, student in rows]
+
+
+@router.get("/coding-assessments/submissions/{submission_id}", response_model=schemas.CodingAssessmentSubmissionOut)
+def coding_assessment_submission_detail(submission_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    row = db.query(models.CodingAssessmentSubmission, models.User).join(models.User, models.User.id == models.CodingAssessmentSubmission.student_id).filter(models.CodingAssessmentSubmission.id == submission_id).first()
+    if not row:
+        raise HTTPException(404, "Coding assessment submission not found")
+    submission, student = row
+    require_teacher(db, assessment_classroom_id(submission.assessment), user.id)
+    return {**schemas.CodingAssessmentSubmissionOut.model_validate(submission).model_dump(), "student_name": student.name, "student_email": student.email}
+
+
+@router.patch("/coding-assessment-answers/{answer_id}/evaluate", response_model=schemas.CodingAssessmentAnswerOut)
+def evaluate_coding_assessment_answer(answer_id: int, data: schemas.CodingAssessmentAnswerEvaluate, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    answer = db.get(models.CodingAssessmentAnswer, answer_id)
+    if not answer:
+        raise HTTPException(404, "Coding assessment answer not found")
+    require_teacher(db, assessment_classroom_id(answer.submission.assessment), user.id)
+    answer.marks_awarded = min(data.marks_awarded, answer.question.marks)
+    answer.feedback = data.feedback
+    answer.evaluation_status = "teacher_evaluated"
+    answer.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(answer)
+    return answer
+
+
+@router.patch("/coding-assessment-submissions/{submission_id}/finalize", response_model=schemas.CodingAssessmentSubmissionOut)
+def finalize_coding_assessment_submission(submission_id: int, data: schemas.CodingAssessmentFinalizeInput, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    submission = db.get(models.CodingAssessmentSubmission, submission_id)
+    if not submission:
+        raise HTTPException(404, "Coding assessment submission not found")
+    require_teacher(db, assessment_classroom_id(submission.assessment), user.id)
+    submission.total_marks_awarded = sum(answer.marks_awarded or 0 for answer in submission.answers)
+    submission.feedback = data.feedback
+    submission.status = "evaluated"
     submission.evaluated_at = datetime.utcnow()
     db.commit()
     db.refresh(submission)

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { ArrowLeft, CheckCircle2, Code2, Edit3, Eye, FileUp, Plus, Send, Trash2 } from 'lucide-react'
+import { ArrowLeft, CheckCircle2, ClipboardList, Code2, Edit3, Eye, FileUp, Plus, Send, Trash2 } from 'lucide-react'
 import api, { errorMessage } from '../api/axios'
 import useClassActivity from '../hooks/useClassActivity'
 
@@ -9,6 +9,7 @@ export default function ClassCodespace() {
   const [room, setRoom] = useState(null)
   const [codespace, setCodespace] = useState(null)
   const [tasks, setTasks] = useState([])
+  const [assessments, setAssessments] = useState([])
   const [error, setError] = useState('')
   const [importResult, setImportResult] = useState(null)
   const [importing, setImporting] = useState('')
@@ -21,7 +22,10 @@ export default function ClassCodespace() {
       const codespaceResponse = codespaceId
         ? await api.get(`/codespaces/${codespaceId}`)
         : await api.get(`/classes/${classId}/codespace`)
-      const taskResponse = await api.get(`/codespaces/${codespaceResponse.data.id}/tasks`)
+      const [taskResponse, assessmentResponse] = await Promise.all([
+        api.get(`/codespaces/${codespaceResponse.data.id}/tasks`),
+        api.get(`/codespaces/${codespaceResponse.data.id}/coding-assessments`),
+      ])
       if (!active) return
       setRoom({
         id: codespaceResponse.data.classroom_id,
@@ -30,6 +34,7 @@ export default function ClassCodespace() {
       })
       setCodespace(codespaceResponse.data)
       setTasks(taskResponse.data)
+      setAssessments(assessmentResponse.data)
     }
     loadCodespace().catch(err => { if (active) setError(errorMessage(err)) })
     return () => { active = false }
@@ -53,6 +58,19 @@ export default function ClassCodespace() {
     try {
       await api.delete(`/coding-tasks/${task.id}`)
       setTasks(current => current.filter(item => item.id !== task.id))
+    } catch (err) { setError(errorMessage(err)) }
+  }
+  const publishAssessment = async assessment => {
+    try {
+      const { data } = await api.post(`/coding-assessments/${assessment.id}/publish`)
+      setAssessments(current => current.map(item => item.id === data.id ? data : item))
+    } catch (err) { setError(errorMessage(err)) }
+  }
+  const deleteAssessment = async assessment => {
+    if (!window.confirm(`Delete "${assessment.title}" and its submissions?`)) return
+    try {
+      await api.delete(`/coding-assessments/${assessment.id}`)
+      setAssessments(current => current.filter(item => item.id !== assessment.id))
     } catch (err) { setError(errorMessage(err)) }
   }
   const importExcel = async (file, endpoint, label) => {
@@ -91,9 +109,10 @@ export default function ClassCodespace() {
           <p className="mt-2 text-sm leading-6 text-slate-500">{codespace.description || 'Coding workspace for this class.'}</p>
         </div>
         {teacher && <div className="flex flex-wrap gap-2">
-          <button type="button" className="btn-secondary" disabled={!!importing} onClick={() => taskImportRef.current?.click()}><FileUp size={16} />{importing === 'Coding tasks' ? 'Importing...' : 'Bulk Import Tasks'}</button>
-          <button type="button" className="btn-secondary" disabled={!!importing} onClick={() => answerKeyImportRef.current?.click()}><FileUp size={16} />{importing === 'Answer key' ? 'Importing...' : 'Bulk Import Answer Keys'}</button>
-          <Link className="btn-primary" to={`${detailBase}/tasks/new`}><Plus size={16} />Create task</Link>
+          <button type="button" className="btn-secondary" disabled={!!importing} onClick={() => taskImportRef.current?.click()}><FileUp size={16} />{importing === 'Coding tasks' ? 'Importing...' : 'Import individual tasks'}</button>
+          <button type="button" className="btn-secondary" disabled={!!importing} onClick={() => answerKeyImportRef.current?.click()}><FileUp size={16} />{importing === 'Answer key' ? 'Importing...' : 'Import individual answer keys'}</button>
+          <Link className="btn-secondary" to={`${detailBase}/tasks/new`}><Plus size={16} />Create task</Link>
+          <Link className="btn-primary" to={`${detailBase}/assessments/new`}><ClipboardList size={16} />Create coding assessment</Link>
           <input ref={taskImportRef} type="file" accept=".xlsx" className="sr-only" onChange={event => importExcel(event.target.files?.[0], 'import-tasks', 'Coding tasks')} />
           <input ref={answerKeyImportRef} type="file" accept=".xlsx" className="sr-only" onChange={event => importExcel(event.target.files?.[0], 'import-answer-key', 'Answer key')} />
         </div>}
@@ -106,7 +125,42 @@ export default function ClassCodespace() {
       {!!importResult.errors?.length && <ul className="mt-2 list-disc space-y-1 pl-5">{importResult.errors.map((item, index) => <li key={index}>{item}</li>)}</ul>}
     </section>}
 
-    <section className="mt-6 grid gap-3">
+    <section className="mt-6 space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-lg font-bold text-slate-950">Coding assessments</h2>
+        <span className="text-xs font-semibold text-slate-400">{assessments.length} assessment{assessments.length === 1 ? '' : 's'}</span>
+      </div>
+      {assessments.map(assessment => <article key={assessment.id} className="card p-5">
+        <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="text-lg font-bold text-slate-950">{assessment.title}</h3>
+              <span className={`rounded-full px-2.5 py-1 text-[11px] font-bold uppercase ${assessment.task_type === 'web' ? 'bg-cyan-50 text-cyan-700' : 'bg-violet-50 text-violet-700'}`}>{assessment.task_type === 'web' ? 'Web' : 'Python'}</span>
+              <AssessmentStatusBadge assessment={assessment} teacher={teacher} />
+            </div>
+            <p className="mt-1 line-clamp-2 text-sm leading-6 text-slate-500">{assessment.description || 'No description provided.'}</p>
+            <div className="mt-3 flex flex-wrap gap-2 text-xs font-semibold text-slate-500">
+              <span>{assessment.question_count} questions</span>
+              <span>{assessment.total_marks} marks</span>
+              {teacher && <span>{assessment.submission_count} submissions</span>}
+              {assessment.due_at && <span>Due {serverDate(assessment.due_at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</span>}
+            </div>
+          </div>
+          {teacher ? <div className="flex flex-wrap gap-2">
+            {!assessment.is_published && <button className="btn-secondary" onClick={() => publishAssessment(assessment)}><Send size={15} />Publish</button>}
+            <Link className="btn-secondary" to={`${detailBase}/assessments/${assessment.id}/submissions`}><Eye size={15} />Submissions</Link>
+            <button className="btn-secondary text-red-700 hover:border-red-200 hover:bg-red-50" onClick={() => deleteAssessment(assessment)}><Trash2 size={15} />Delete</button>
+          </div> : <Link className="btn-primary" to={`${detailBase}/assessments/${assessment.id}/attempt`}>Open assessment</Link>}
+        </div>
+      </article>)}
+      {!assessments.length && <div className="empty-state">{teacher ? 'Create a coding assessment from Excel to publish many questions together.' : 'No coding assessments have been published yet.'}</div>}
+    </section>
+
+    <section className="mt-8 grid gap-3">
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-lg font-bold text-slate-950">Individual coding tasks</h2>
+        <span className="text-xs font-semibold text-slate-400">{tasks.length} task{tasks.length === 1 ? '' : 's'}</span>
+      </div>
       {tasks.map(task => <article key={task.id} className="card p-5">
         <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
           <div className="min-w-0">
@@ -140,6 +194,13 @@ function StatusBadge({ task, teacher }) {
   if (teacher) return <span className={`rounded-full px-2.5 py-1 text-[11px] font-bold uppercase ${task.is_published ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>{task.is_published ? 'Published' : 'Draft'}</span>
   if (task.my_submission_status === 'evaluated') return <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-bold uppercase text-emerald-700"><CheckCircle2 size={13} />Evaluated</span>
   if (task.my_submission_status) return <span className="rounded-full bg-blue-50 px-2.5 py-1 text-[11px] font-bold uppercase text-blue-700">Submitted</span>
+  return <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-bold uppercase text-slate-600">Not submitted</span>
+}
+
+function AssessmentStatusBadge({ assessment, teacher }) {
+  if (teacher) return <span className={`rounded-full px-2.5 py-1 text-[11px] font-bold uppercase ${assessment.is_published ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>{assessment.is_published ? 'Published' : 'Draft'}</span>
+  if (assessment.my_submission_status === 'evaluated') return <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-bold uppercase text-emerald-700"><CheckCircle2 size={13} />Evaluated</span>
+  if (assessment.my_submission_status) return <span className="rounded-full bg-blue-50 px-2.5 py-1 text-[11px] font-bold uppercase text-blue-700">Submitted</span>
   return <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-bold uppercase text-slate-600">Not submitted</span>
 }
 

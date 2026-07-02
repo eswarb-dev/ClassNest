@@ -836,3 +836,120 @@ class CodespaceImportSummary(BaseModel):
     updated_count: int = 0
     skipped_count: int = 0
     errors: list[str] = Field(default_factory=list)
+
+
+class CodingAssessmentQuestionInput(BaseModel):
+    question_id: Optional[str] = None
+    title: str = Field(min_length=1, max_length=500)
+    description: str = Field(min_length=1)
+    starter_code: Optional[str] = None
+    starter_html: Optional[str] = None
+    starter_css: Optional[str] = None
+    starter_js: Optional[str] = None
+    expected_output: Optional[str] = None
+    visible_test_cases: Optional[str] = None
+    hidden_test_cases: Optional[str] = None
+    marks: int = Field(default=10, ge=0, le=1000)
+
+
+class CodingAssessmentInput(BaseModel):
+    title: str = Field(min_length=1, max_length=300)
+    description: str = ""
+    task_type: Literal["python", "web"] = "python"
+    due_at: Optional[datetime] = None
+    is_published: bool = False
+    questions: list[CodingAssessmentQuestionInput] = Field(min_length=1)
+    answer_keys: list[CodingTaskAnswerKeyInput] = Field(default_factory=list)
+
+
+class CodingAssessmentQuestionOut(ORMModel):
+    id: int
+    assessment_id: int
+    question_id: Optional[str] = None
+    title: str
+    description: str
+    starter_code: Optional[str] = None
+    starter_html: Optional[str] = None
+    starter_css: Optional[str] = None
+    starter_js: Optional[str] = None
+    expected_output: Optional[str] = None
+    visible_test_cases: Optional[str] = None
+    hidden_test_cases: Optional[str] = None
+    marks: int
+    sort_order: int
+
+
+class CodingAssessmentOut(ORMModel):
+    id: int
+    codespace_id: int
+    title: str
+    description: Optional[str] = None
+    task_type: str = "python"
+    total_marks: int
+    due_at: Optional[datetime] = None
+    is_published: bool
+    created_at: datetime
+    question_count: int = 0
+    submission_count: int = 0
+    my_submission_status: Optional[str] = None
+    my_submission_id: Optional[int] = None
+    my_marks_awarded: Optional[int] = None
+    questions: list[CodingAssessmentQuestionOut] = Field(default_factory=list)
+
+
+class CodingAssessmentAnswerInput(BaseModel):
+    question_id: int
+    code: Optional[str] = Field(default=None, max_length=50000)
+    html_code: Optional[str] = Field(default=None, max_length=50000)
+    css_code: Optional[str] = Field(default=None, max_length=50000)
+    js_code: Optional[str] = Field(default=None, max_length=50000)
+    output: Optional[str] = None
+
+
+class CodingAssessmentSubmitInput(BaseModel):
+    answers: list[CodingAssessmentAnswerInput] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def reject_duplicate_questions(self):
+        question_ids = [answer.question_id for answer in self.answers]
+        if len(question_ids) != len(set(question_ids)):
+            raise ValueError("Each question may only be answered once")
+        return self
+
+
+class CodingAssessmentAnswerOut(ORMModel):
+    id: int
+    submission_id: int
+    question_id: int
+    code: Optional[str] = None
+    html_code: Optional[str] = None
+    css_code: Optional[str] = None
+    js_code: Optional[str] = None
+    output: Optional[str] = None
+    marks_awarded: int = 0
+    feedback: Optional[str] = None
+    evaluation_status: str = "needs_review"
+    question: Optional[CodingAssessmentQuestionOut] = None
+
+
+class CodingAssessmentSubmissionOut(ORMModel):
+    id: int
+    assessment_id: int
+    student_id: int
+    status: str
+    total_marks_awarded: int = 0
+    feedback: Optional[str] = None
+    submitted_at: datetime
+    evaluated_at: Optional[datetime] = None
+    student_name: Optional[str] = None
+    student_email: Optional[str] = None
+    answers: list[CodingAssessmentAnswerOut] = Field(default_factory=list)
+
+
+class CodingAssessmentAnswerEvaluate(BaseModel):
+    marks_awarded: int = Field(ge=0, le=1000)
+    feedback: Optional[str] = None
+
+
+class CodingAssessmentFinalizeInput(BaseModel):
+    feedback: Optional[str] = None
