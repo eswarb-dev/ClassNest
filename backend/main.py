@@ -48,7 +48,7 @@ async def log_slow_requests(request: Request, call_next):
     return response
 
 # Configure CORS from environment
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://class-nest-phi.vercel.app/")
 allow_origins = [
     FRONTEND_URL,
     "http://localhost:5173",
